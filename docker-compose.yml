@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  bengali-gemma3-inference:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - WANDB_PROJECT=${WANDB_PROJECT:-vivasoft/bengali-gemma3-finetune}
+      - WANDB_ARTIFACT=${WANDB_ARTIFACT:-bengali-gemma3-lora-model}
+      - WANDB_VERSION=${WANDB_VERSION:-v0}
+      - WANDB_API_KEY=${WANDB_API_KEY}
+    volumes:
+      # Optional: Mount for model caching
+      - model_cache:/root/.cache/huggingface
+      - wandb_cache:/root/.cache/wandb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  model_cache:
+  wandb_cache:
