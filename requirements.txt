@@ -8,6 +8,7 @@ wandb==0.16.0
 numpy<2.0.0
 sentencepiece>=0.1.99
 peft>=0.8.2
+bitsandbytes
 
 # Optional: Add these back if you need CUDA support
 # torch>=2.0.0
