@@ -1,259 +1,149 @@
-# import os
-# import logging
-# from typing import Optional
-# from contextlib import asynccontextmanager
-
-# import wandb
-# import torch
-# from fastapi import FastAPI, HTTPException
-# from pydantic import BaseModel
-# from transformers import AutoTokenizer, AutoModelForCausalLM
-
-# # Setup logging
-# logging.basicConfig(level=logging.INFO)
-# logger = logging.getLogger(__name__)
-
-# # Global variables for model and tokenizer
-# model = None
-# tokenizer = None
-
-# class GenerateRequest(BaseModel):
-#     text: str
-#     max_new_tokens: Optional[int] = 128
-#     temperature: Optional[float] = 0.7
-#     top_p: Optional[float] = 0.9
-
-# class GenerateResponse(BaseModel):
-#     generated_text: str
-#     input_text: str
-
-# async def load_model():
-#     """Load model and tokenizer from Wandb artifact"""
-#     global model, tokenizer
-    
-#     # Get configuration from environment variables
-#     WANDB_PROJECT = os.getenv("WANDB_PROJECT", "vivasoft/bengali-gemma3-finetune")
-#     WANDB_ARTIFACT = os.getenv("WANDB_ARTIFACT", "bengali-gemma3-lora-model")
-#     WANDB_VERSION = os.getenv("WANDB_VERSION", "v0")
-#     WANDB_API_KEY = os.getenv("WANDB_API_KEY")
-    
-#     if not WANDB_API_KEY:
-#         raise ValueError("WANDB_API_KEY environment variable is required")
-    
-#     logger.info("=== Starting Model Loading from Wandb ===")
-    
-#     # Initialize wandb and download model
-#     run = wandb.init(project=WANDB_PROJECT, job_type="inference")
-#     artifact = run.use_artifact(f"{WANDB_ARTIFACT}:{WANDB_VERSION}")
-#     model_dir = artifact.download()
-    
-#     logger.info(f"Model downloaded to: {model_dir}")
-    
-#     # Load tokenizer
-#     logger.info("Loading tokenizer...")
-#     tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=False, trust_remote_code=True)
-#     if tokenizer.pad_token is None:
-#         tokenizer.pad_token = tokenizer.eos_token
-    
-#     # Load model
-#     logger.info("Loading model...")
-#     model = AutoModelForCausalLM.from_pretrained(
-#         model_dir,
-#         torch_dtype=torch.float16,
-#         device_map="auto",
-#         trust_remote_code=True,
-#         low_cpu_mem_usage=True
-#     )
-    
-#     logger.info("✅ Model loaded successfully!")
-#     wandb.finish()
-
-# @asynccontextmanager
-# async def lifespan(app: FastAPI):
-#     # Startup
-#     await load_model()
-#     yield
-#     # Shutdown
-#     logger.info("Shutting down...")
-
-# # Create FastAPI app
-# app = FastAPI(
-#     title="Bengali Gemma3 Inference Server",
-#     description="API server for Bengali Gemma3 model inference",
-#     version="1.0.0",
-#     lifespan=lifespan
-# )
-
-# @app.get("/health")
-# async def health_check():
-#     """Health check endpoint"""
-#     return {"status": "healthy", "model_loaded": model is not None}
-
-# @app.post("/generate", response_model=GenerateResponse)
-# async def generate_text(request: GenerateRequest):
-#     """Generate text using the loaded model"""
-#     if model is None or tokenizer is None:
-#         raise HTTPException(status_code=503, detail="Model not loaded")
-    
-#     try:
-#         logger.info(f"Generating response for: {request.text}")
-        
-#         # Prepare input
-#         messages = [{"role": "user", "content": request.text}]
-#         text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        
-#         # Handle list return
-#         if isinstance(text, list):
-#             text = text[0] if text else ""
-        
-#         # Tokenize
-#         inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
-        
-#         # Move to GPU if available
-#         if torch.cuda.is_available():
-#             inputs = {k: v.to("cuda") for k, v in inputs.items()}
-        
-#         # Generate
-#         with torch.no_grad():
-#             outputs = model.generate(
-#                 **inputs,
-#                 max_new_tokens=request.max_new_tokens,
-#                 temperature=request.temperature,
-#                 top_p=request.top_p,
-#                 do_sample=True,
-#                 pad_token_id=tokenizer.eos_token_id,
-#                 eos_token_id=tokenizer.eos_token_id
-#             )
-        
-#         # Decode
-#         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-#         # Extract generated part
-#         if "<start_of_turn>model\n" in response:
-#             generated_part = response.split("<start_of_turn>model\n")[-1].replace("<end_of_turn>", "").strip()
-#         else:
-#             # Remove input part
-#             input_text = tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)
-#             generated_part = response.replace(input_text, "").strip()
-        
-#         logger.info(f"Generated response: {generated_part}")
-        
-#         return GenerateResponse(
-#             generated_text=generated_part,
-#             input_text=request.text
-#         )
-        
-#     except Exception as e:
-#         logger.error(f"Error during generation: {str(e)}")
-#         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
-
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=8000)
+import os
+import logging
+from typing import Optional
+from contextlib import asynccontextmanager
 
 import wandb
 import torch
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel, PeftConfig
+from peft import PeftModel
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Global variables for model and tokenizer
+model = None
+tokenizer = None
 
 # Configuration
-PROJECT_NAME = "bengali-gemma3-finetune"  # No slashes in WANDB project name!
+PROJECT_NAME = "bengali-gemma3-finetune"
 ARTIFACT_NAME = "bengali-gemma3-lora-model"
 VERSION = "v0"
-
-# Base model
 BASE_MODEL_NAME = "unsloth/gemma-3-1b-it-unsloth-bnb-4bit"
 
-# Bengali test cases
-bengali_test_cases = [
-    "ভিভাসফ্ট কি ধরনের কোম্পানি?",
-    "ভিভাসফ্ট কি ধরনের সমাধান প্রদান করে?",
-    "ভিভাসফ্ট মুল লক্ষ্য কি?",
-    "ভিভাসফ্ট কোথায় অবস্থিত?",
-    "কথন কি",
-    "নতুন এজেন্টদের ট্রেনিংয়ের সময় কমাতে কথন  কিভাবে সাহায্য করে?"
-]
+class GenerateRequest(BaseModel):
+    text: str
+    max_new_tokens: Optional[int] = 128
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.9
 
-print("=== Starting Model Loading from Wandb ===")
+class GenerateResponse(BaseModel):
+    generated_text: str
+    input_text: str
 
-# Initialize wandb and download model
-run = wandb.init(project=PROJECT_NAME, job_type="inference")
-artifact = run.use_artifact(f"{ARTIFACT_NAME}:{VERSION}")
-adapter_dir = artifact.download()
+async def load_model():
+    """Load model and tokenizer from Wandb artifact"""
+    global model, tokenizer
+    
+    logger.info("=== Starting Model Loading from Wandb ===")
+    
+    # Initialize wandb and download model
+    run = wandb.init(project=PROJECT_NAME, job_type="inference")
+    artifact = run.use_artifact(f"{ARTIFACT_NAME}:{VERSION}")
+    adapter_dir = artifact.download()
+    
+    logger.info(f"LoRA adapter downloaded to: {adapter_dir}")
+    
+    # Load tokenizer from base model
+    logger.info("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Load base model
+    logger.info("Loading base model...")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL_NAME,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        trust_remote_code=True,
+        low_cpu_mem_usage=True
+    )
+    
+    # Apply LoRA adapter using PEFT
+    logger.info("Applying LoRA adapter...")
+    model = PeftModel.from_pretrained(base_model, adapter_dir)
+    
+    logger.info("✅ Model with adapter loaded!")
+    wandb.finish()
 
-print(f"LoRA adapter downloaded to: {adapter_dir}")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await load_model()
+    yield
+    # Shutdown
+    logger.info("Shutting down...")
 
-# Load tokenizer from base model
-print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME, trust_remote_code=True)
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-# Load base model
-print("Loading base model...")
-base_model = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL_NAME,
-    torch_dtype=torch.float16,
-    device_map="auto",
-    trust_remote_code=True,
-    low_cpu_mem_usage=True
+# Create FastAPI app
+app = FastAPI(
+    title="Bengali Gemma3 Inference Server",
+    description="API server for Bengali Gemma3 model inference",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-# Apply LoRA adapter using PEFT
-print("Applying LoRA adapter...")
-model = PeftModel.from_pretrained(base_model, adapter_dir)
-print("✅ Model with adapter loaded!")
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "model_loaded": model is not None}
 
-# Run inference
-print("\n=== Starting Bengali Inference ===")
-for i, question in enumerate(bengali_test_cases, 1):
-    print(f"\n🔸 Test {i}: {question}")
+@app.post("/generate", response_model=GenerateResponse)
+async def generate_text(request: GenerateRequest):
+    """Generate text using the loaded model"""
+    if model is None or tokenizer is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    logger.info(f"Generating response for: {request.text}")
+    
+    # Prepare input
+    messages = [{"role": "user", "content": request.text}]
+    text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    
+    # Handle list return
+    if isinstance(text, list):
+        text = text[0] if text else ""
+    
+    # Tokenize
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+    
+    # Move to GPU if available
+    if torch.cuda.is_available():
+        inputs = {k: v.to("cuda") for k, v in inputs.items()}
+    
+    # Generate
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=request.max_new_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
+    
+    # Decode
+    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    # Extract generated part
+    if "<start_of_turn>model\n" in response:
+        generated_part = response.split("<start_of_turn>model\n")[-1].replace("<end_of_turn>", "").strip()
+    else:
+        # Remove input part
+        input_text = tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)
+        generated_part = response.replace(input_text, "").strip()
+    
+    logger.info(f"Generated response: {generated_part}")
+    
+    return GenerateResponse(
+        generated_text=generated_part,
+        input_text=request.text
+    )
 
-    try:
-        # Prepare input
-        messages = [{"role": "user", "content": question}]
-        text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-
-        # Handle list return
-        if isinstance(text, list):
-            text = text[0] if text else ""
-
-        # Tokenize
-        inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
-
-        # Move to GPU if available
-        if torch.cuda.is_available():
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
-            model = model.to("cuda")
-
-        # Generate
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=128,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id
-            )
-
-        # Decode
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        # Extract generated part
-        if "<start_of_turn>model\n" in response:
-            generated_part = response.split("<start_of_turn>model\n")[-1].replace("<end_of_turn>", "").strip()
-        else:
-            # Remove input part
-            input_text = tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)
-            generated_part = response.replace(input_text, "").strip()
-
-        print(f"✅ Response: {generated_part}")
-
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        continue
-
-print("\n=== Inference Complete ===")
-wandb.finish()
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
