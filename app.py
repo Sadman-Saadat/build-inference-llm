@@ -19,11 +19,13 @@ model = None
 tokenizer = None
 
 # Configuration
-PROJECT_NAME = "bengali-gemma3-finetune"
-ARTIFACT_NAME = "bengali-gemma3-lora-model"
-VERSION = "v0"
+PROJECT_NAME = os.getenv("WANDB_PROJECT", "bengali-gemma3-finetune")
+ARTIFACT_NAME = os.getenv("WANDB_ARTIFACT", "bengali-gemma3-finetune")
+VERSION = os.getenv("WANDB_VERSION", "v0")
 BASE_MODEL_NAME = "unsloth/gemma-3-1b-it-unsloth-bnb-4bit"
 ENTITY = os.getenv("ENTITY", None)
+WANDB_API_KEY = os.getenv("WANDB_API_KEY", None)
+CACHE_DIR = "./model_cache"  # Fallback cache path
 
 class GenerateRequest(BaseModel):
     text: str
@@ -36,25 +38,52 @@ class GenerateResponse(BaseModel):
     input_text: str
 
 async def load_model():
-    """Load model and tokenizer from Wandb artifact"""
+    """Load model and tokenizer from Wandb artifact or local cache"""
     global model, tokenizer
-    
-    logger.info("=== Starting Model Loading from Wandb ===")
 
+    logger.info("=== Starting Model Loading ===")
 
-    # Initialize wandb and download model
-    run = wandb.init(project=PROJECT_NAME, job_type="inference", entity=ENTITY)
-    artifact = run.use_artifact(f"{ARTIFACT_NAME}:{VERSION}")
-    adapter_dir = artifact.download()
-    
-    logger.info(f"LoRA adapter downloaded to: {adapter_dir}")
-    
+    adapter_dir = None
+
+    # Try to authenticate with W&B if API key is provided
+    if WANDB_API_KEY:
+        try:
+            wandb.login(key=WANDB_API_KEY)
+            logger.info("✅ W&B authentication successful.")
+
+            run = wandb.init(
+                project=PROJECT_NAME,
+                entity=ENTITY,
+                job_type="inference",
+                settings=wandb.Settings(silent=True)
+            )
+
+            artifact = run.use_artifact(f"{ARTIFACT_NAME}:{VERSION}")
+            adapter_dir = artifact.download(root=CACHE_DIR)
+            logger.info(f"✅ LoRA adapter downloaded to: {adapter_dir}")
+            wandb.finish()
+
+        except Exception as e:
+            logger.warning(f"⚠️ W&B download failed: {e}")
+
+    else:
+        logger.warning("⚠️ No WANDB_API_KEY provided. Skipping W&B download.")
+
+    # If W&B failed, try using cached model
+    if not adapter_dir or not os.path.exists(adapter_dir):
+        if os.path.exists(CACHE_DIR):
+            adapter_dir = CACHE_DIR
+            logger.info(f"✅ Using cached adapter from: {adapter_dir}")
+        else:
+            logger.error("❌ No adapter found. Cannot continue without model.")
+            raise RuntimeError("Model adapter missing. Please set WANDB_API_KEY or provide local cache.")
+
     # Load tokenizer from base model
     logger.info("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+
     # Load base model
     logger.info("Loading base model...")
     base_model = AutoModelForCausalLM.from_pretrained(
@@ -64,13 +93,12 @@ async def load_model():
         trust_remote_code=True,
         low_cpu_mem_usage=True
     )
-    
-    # Apply LoRA adapter using PEFT
+
+    # Apply LoRA adapter
     logger.info("Applying LoRA adapter...")
     model = PeftModel.from_pretrained(base_model, adapter_dir)
-    
+
     logger.info("✅ Model with adapter loaded!")
-    wandb.finish()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,24 +126,22 @@ async def generate_text(request: GenerateRequest):
     """Generate text using the loaded model"""
     if model is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
-    
+
     logger.info(f"Generating response for: {request.text}")
-    
+
     # Prepare input
     messages = [{"role": "user", "content": request.text}]
     text = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    
-    # Handle list return
+
     if isinstance(text, list):
         text = text[0] if text else ""
-    
+
     # Tokenize
     inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
-    
-    # Move to GPU if available
+
     if torch.cuda.is_available():
         inputs = {k: v.to("cuda") for k, v in inputs.items()}
-    
+
     # Generate
     with torch.no_grad():
         outputs = model.generate(
@@ -127,20 +153,17 @@ async def generate_text(request: GenerateRequest):
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id
         )
-    
-    # Decode
+
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    
-    # Extract generated part
+
     if "<start_of_turn>model\n" in response:
         generated_part = response.split("<start_of_turn>model\n")[-1].replace("<end_of_turn>", "").strip()
     else:
-        # Remove input part
         input_text = tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)
         generated_part = response.replace(input_text, "").strip()
-    
+
     logger.info(f"Generated response: {generated_part}")
-    
+
     return GenerateResponse(
         generated_text=generated_part,
         input_text=request.text
