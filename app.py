@@ -39,6 +39,7 @@ async def load_model():
     global model, tokenizer
     
     logger.info("=== Starting Model Loading from Wandb ===")
+
     
     # Initialize wandb and download model
     run = wandb.init(project=PROJECT_NAME, job_type="inference")
