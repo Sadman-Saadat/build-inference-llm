@@ -23,6 +23,7 @@ PROJECT_NAME = "bengali-gemma3-finetune"
 ARTIFACT_NAME = "bengali-gemma3-lora-model"
 VERSION = "v0"
 BASE_MODEL_NAME = "unsloth/gemma-3-1b-it-unsloth-bnb-4bit"
+ENTITY = os.getenv("ENTITY", None)
 
 class GenerateRequest(BaseModel):
     text: str
@@ -40,9 +41,9 @@ async def load_model():
     
     logger.info("=== Starting Model Loading from Wandb ===")
 
-    
+
     # Initialize wandb and download model
-    run = wandb.init(project=PROJECT_NAME, job_type="inference")
+    run = wandb.init(project=PROJECT_NAME, job_type="inference", entity=ENTITY)
     artifact = run.use_artifact(f"{ARTIFACT_NAME}:{VERSION}")
     adapter_dir = artifact.download()
     
